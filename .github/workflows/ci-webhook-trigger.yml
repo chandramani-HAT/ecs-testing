@@ -1,0 +1,330 @@
+name: CI - Build and Push Docker Image via CodeBuild Webhook
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+      - 'feature/**'
+      - 'hotfix/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  ECR_REPOSITORY: 533267275979.dkr.ecr.us-east-1.amazonaws.com/hat/ecs
+  AWS_REGION: us-east-1
+
+jobs:
+  trigger-build:
+    name: Trigger CodeBuild via Webhook
+    runs-on: ubuntu-latest
+    
+    outputs:
+      branch: ${{ steps.extract-branch.outputs.branch }}
+      commit-sha: ${{ github.sha }}
+      short-sha: ${{ steps.extract-branch.outputs.short-sha }}
+
+# ---------------------------------------------
+    steps:
+    # Step 1: Checkout code
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+# ---------------------------------------------
+    # Step 2: Extract branch information
+    - name: Extract branch name
+      id: extract-branch
+      run: |
+        # Get branch name
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          BRANCH_NAME="${{ github.head_ref }}"
+        else
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+        fi
+        
+        # Replace / with - for tagging
+        BRANCH_NAME=${BRANCH_NAME//\//-}
+        
+        # Get short SHA
+        SHORT_SHA=$(git rev-parse --short=7 HEAD)
+        
+        echo "branch=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+        echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        
+        echo "🌿 Branch: ${BRANCH_NAME}"
+        echo "📌 Short SHA: ${SHORT_SHA}"
+        echo "📝 Full SHA: ${{ github.sha }}"
+
+
+# ---------------------------------------------
+
+    # Step 3: Trigger CodeBuild via webhook URL
+    - name: Trigger CodeBuild via Webhook
+      id: trigger-codebuild
+      run: |
+        echo "🚀 Triggering CodeBuild via webhook..."
+        
+        # The webhook URL from CodeBuild
+        WEBHOOK_URL="${{ secrets.CODEBUILD_WEBHOOK_URL }}"
+        
+        if [ -z "$WEBHOOK_URL" ]; then
+          echo "❌ Error: CODEBUILD_WEBHOOK_URL secret not set!"
+          echo "Please add the CodeBuild webhook URL to GitHub Secrets"
+          exit 1
+        fi
+        
+        # Prepare payload (simulating GitHub webhook)
+        cat > payload.json << EOF
+        {
+          "ref": "${{ github.ref }}",
+          "before": "${{ github.event.before }}",
+          "after": "${{ github.sha }}",
+          "repository": {
+            "name": "${{ github.repository }}",
+            "full_name": "${{ github.repository }}",
+            "clone_url": "${{ github.repositoryUrl }}",
+            "html_url": "https://github.com/${{ github.repository }}"
+          },
+          "pusher": {
+            "name": "${{ github.actor }}",
+            "email": "${{ github.actor }}@users.noreply.github.com"
+          },
+          "sender": {
+            "login": "${{ github.actor }}"
+          },
+          "head_commit": {
+            "id": "${{ github.sha }}",
+            "message": "${{ github.event.head_commit.message }}",
+            "author": {
+              "name": "${{ github.actor }}"
+            }
+          },
+          "commits": []
+        }
+        EOF
+        
+        echo "📤 Sending webhook request to CodeBuild..."
+        
+        # Trigger webhook
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          -H "Content-Type: application/json" \
+          -H "X-GitHub-Event: push" \
+          -H "X-Hub-Signature: sha1=dummy" \
+          -d @payload.json \
+          "$WEBHOOK_URL")
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n-1)
+        
+        echo "HTTP Status: $HTTP_CODE"
+        echo "Response: $BODY"
+        
+        if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+          echo "✅ CodeBuild webhook triggered successfully!"
+          echo "triggered=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Failed to trigger CodeBuild webhook (HTTP $HTTP_CODE)"
+          echo "triggered=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    # Step 4: Wait and check build status via GitHub commit status
+    - name: Wait for CodeBuild to complete
+      id: wait-build
+      run: |
+        echo "⏳ Waiting for CodeBuild to report status..."
+        
+        MAX_WAIT_TIME=1800  # 30 minutes
+        POLL_INTERVAL=15     # Check every 15 seconds
+        ELAPSED=0
+        
+        while [ $ELAPSED -lt $MAX_WAIT_TIME ]; do
+          # Check commit status using GitHub API
+          STATUS_RESPONSE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/status")
+          
+          STATE=$(echo "$STATUS_RESPONSE" | jq -r '.state')
+          
+          echo "Current status: $STATE (${ELAPSED}s elapsed)"
+          
+          # Check statuses from CodeBuild
+          CODEBUILD_STATUS=$(echo "$STATUS_RESPONSE" | jq -r '.statuses[] | select(.context | contains("CodeBuild")) | .state' | head -1)
+          
+          if [ "$CODEBUILD_STATUS" == "success" ]; then
+            echo "✅ CodeBuild completed successfully!"
+            echo "build-status=success" >> $GITHUB_OUTPUT
+            exit 0
+          elif [ "$CODEBUILD_STATUS" == "failure" ] || [ "$CODEBUILD_STATUS" == "error" ]; then
+            echo "❌ CodeBuild failed!"
+            
+            # Get the target URL for logs
+            LOG_URL=$(echo "$STATUS_RESPONSE" | jq -r '.statuses[] | select(.context | contains("CodeBuild")) | .target_url' | head -1)
+            echo "📝 Check logs at: $LOG_URL"
+            
+            echo "build-status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        done
+        
+        echo "⏰ Timeout waiting for CodeBuild (${MAX_WAIT_TIME}s)"
+        echo "build-status=timeout" >> $GITHUB_OUTPUT
+        exit 1
+
+    # Step 5: Generate image tags
+    - name: Generate semantic tags
+      id: generate-tags
+      run: |
+        BRANCH="${{ steps.extract-branch.outputs.branch }}"
+        SHORT_SHA="${{ steps.extract-branch.outputs.short-sha }}"
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        
+        # Generate primary tag based on branch
+        case "$BRANCH" in
+          main)
+            PRIMARY_TAG="prod-${SHORT_SHA}-${TIMESTAMP}"
+            ADDITIONAL_TAGS="latest,stable"
+            ;;
+          staging)
+            PRIMARY_TAG="staging-${SHORT_SHA}-${TIMESTAMP}"
+            ADDITIONAL_TAGS="staging-latest"
+            ;;
+          develop)
+            PRIMARY_TAG="dev-${SHORT_SHA}-${TIMESTAMP}"
+            ADDITIONAL_TAGS="dev-latest"
+            ;;
+          *)
+            PRIMARY_TAG="${BRANCH}-${SHORT_SHA}-${TIMESTAMP}"
+            ADDITIONAL_TAGS=""
+            ;;
+        esac
+        
+        echo "primary-tag=${PRIMARY_TAG}" >> $GITHUB_OUTPUT
+        echo "additional-tags=${ADDITIONAL_TAGS}" >> $GITHUB_OUTPUT
+        echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
+        
+        echo "🏷️  Primary Tag: ${PRIMARY_TAG}"
+        echo "🏷️  Additional Tags: ${ADDITIONAL_TAGS}"
+
+    # Step 6: Create image manifest
+    - name: Create image manifest
+      run: |
+        AWS_ACCOUNT_ID="${{ secrets.AWS_ACCOUNT_ID }}"
+        
+        if [ -z "$AWS_ACCOUNT_ID" ]; then
+          echo "⚠️  AWS_ACCOUNT_ID not set, using placeholder"
+          AWS_ACCOUNT_ID="YOUR_ACCOUNT_ID"
+        fi
+        
+        IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ steps.generate-tags.outputs.primary-tag }}"
+        
+        cat > image-manifest.json << EOF
+        {
+          "imageUri": "$IMAGE_URI",
+          "imageTag": "${{ steps.generate-tags.outputs.primary-tag }}",
+          "additionalTags": "${{ steps.generate-tags.outputs.additional-tags }}",
+          "shortSha": "${{ steps.generate-tags.outputs.short-sha }}",
+          "fullSha": "${{ github.sha }}",
+          "branch": "${{ steps.extract-branch.outputs.branch }}",
+          "timestamp": "${{ steps.generate-tags.outputs.timestamp }}",
+          "repository": "${{ github.repository }}",
+          "actor": "${{ github.actor }}",
+          "runId": "${{ github.run_id }}",
+          "runNumber": "${{ github.run_number }}"
+        }
+        EOF
+        
+        echo "📋 Image Manifest:"
+        cat image-manifest.json
+
+    # Step 7: Upload image manifest as artifact
+    - name: Upload image manifest
+      uses: actions/upload-artifact@v3
+      with:
+        name: image-manifest-${{ steps.extract-branch.outputs.branch }}
+        path: image-manifest.json
+        retention-days: 30
+
+    # Step 8: Comment on PR (if PR)
+    - name: Comment on PR with build info
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const imageTag = '${{ steps.generate-tags.outputs.primary-tag }}';
+          const branch = '${{ steps.extract-branch.outputs.branch }}';
+          const sha = '${{ steps.extract-branch.outputs.short-sha }}';
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `### 🐳 Docker Image Built Successfully via CodeBuild\n\n` +
+                  `**Image Tag:** \`${imageTag}\`\n` +
+                  `**Branch:** \`${branch}\`\n` +
+                  `**Commit:** \`${sha}\`\n\n` +
+                  `✅ CodeBuild completed successfully!\n` +
+                  `📦 Image is ready in ECR\n\n` +
+                  `The image will be automatically deployed once this PR is merged.`
+          })
+
+    # Step 9: Build summary
+    - name: CI Pipeline Summary
+      run: |
+        echo "## 🎉 CI Pipeline Completed Successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📦 Build Details" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** \`${{ steps.extract-branch.outputs.branch }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Short SHA:** \`${{ steps.extract-branch.outputs.short-sha }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Primary Image Tag:** \`${{ steps.generate-tags.outputs.primary-tag }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Additional Tags:** \`${{ steps.generate-tags.outputs.additional-tags }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚀 What Happened" >> $GITHUB_STEP_SUMMARY
+        echo "1. ✅ GitHub Action triggered CodeBuild via webhook" >> $GITHUB_STEP_SUMMARY
+        echo "2. ✅ CodeBuild built and pushed Docker image to ECR" >> $GITHUB_STEP_SUMMARY
+        echo "3. ✅ CodeBuild reported success status back to GitHub" >> $GITHUB_STEP_SUMMARY
+        echo "4. ✅ Image manifest created for CD pipeline" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔄 Next Steps" >> $GITHUB_STEP_SUMMARY
+        
+        BRANCH="${{ steps.extract-branch.outputs.branch }}"
+        if [[ "$BRANCH" == "main" || "$BRANCH" == "staging" || "$BRANCH" == "develop" ]]; then
+          echo "- The CD pipeline will automatically deploy this image to the **${BRANCH}** environment" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- This is a feature/hotfix branch - no automatic deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- Image is available in ECR for manual deployment if needed" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Image Information" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        cat image-manifest.json >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  # Optional: Notify on failure
+  notify-failure:
+    name: Notify Build Failure
+    needs: trigger-build
+    runs-on: ubuntu-latest
+    if: failure()
+    
+    steps:
+    - name: Build failed notification
+      run: |
+        echo "❌ CI Pipeline Failed!"
+        echo "Branch: ${{ needs.trigger-build.outputs.branch }}"
+        echo "Commit: ${{ github.sha }}"
+        echo ""
+        echo "Please check:"
+        echo "1. CodeBuild webhook is properly configured"
+        echo "2. CodeBuild project has necessary permissions"
+        echo "3. GitHub repository is connected to CodeBuild"
+        echo "4. Check CodeBuild logs in AWS Console"
