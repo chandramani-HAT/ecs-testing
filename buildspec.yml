@@ -3,17 +3,6 @@ version: 0.2
 # This buildspec is triggered by the CodeBuild webhook when GitHub Actions calls it
 # It builds the Docker image, pushes to ECR, and reports status back to GitHub
 
-# env:
-#   variables:
-#     # These should be set in CodeBuild project environment variables
-#     # AWS_DEFAULT_REGION: us-east-1
-#     # AWS_ACCOUNT_ID: 123456789012
-#     # IMAGE_REPO_NAME: ecs-devops-sandbox-repository
-#     # CONTAINER_NAME: ecs-devops-sandbox
-#   parameter-store:
-#     # Optional: Store sensitive values in Parameter Store
-#     # GITHUB_TOKEN: /codebuild/github-token
-
 phases:
   pre_build:
     commands:
@@ -31,7 +20,7 @@ phases:
       # Extract branch from webhook
       - |
         if [ ! -z "$CODEBUILD_WEBHOOK_HEAD_REF" ]; then
-          BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\/heads\///' | sed 's/\//-/g')
+          BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\\/heads\\///' | sed 's/\\//-/g')
           echo "Branch detected from webhook: $BRANCH_NAME"
         else
           BRANCH_NAME="unknown"
@@ -85,14 +74,14 @@ phases:
       # Build Docker image with metadata
       - |
         echo "Running docker build with build arguments..."
-        docker build \
-          --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
-          --build-arg VCS_REF=$COMMIT_HASH \
-          --build-arg VERSION=$BRANCH_NAME-$COMMIT_HASH \
-          --build-arg BUILD_NUMBER=$BUILD_NUMBER \
-          -t $REPOSITORY_URI:$COMMIT_HASH \
-          -t $REPOSITORY_URI:build-$BUILD_NUMBER \
-          -t $REPOSITORY_URI:latest-build \
+        docker build \\
+          --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \\
+          --build-arg VCS_REF=$COMMIT_HASH \\
+          --build-arg VERSION=$BRANCH_NAME-$COMMIT_HASH \\
+          --build-arg BUILD_NUMBER=$BUILD_NUMBER \\
+          -t $REPOSITORY_URI:$COMMIT_HASH \\
+          -t $REPOSITORY_URI:build-$BUILD_NUMBER \\
+          -t $REPOSITORY_URI:latest-build \\
           .
       
       - echo "✅ Docker image built successfully"
@@ -190,55 +179,48 @@ phases:
       # Create image definitions file
       - |
         echo "Creating imagedefinitions.json..."
-        printf '[{"name":"%s","imageUri":"%s"}]' \
-          $CONTAINER_NAME \
+        printf '[{"name":"%s","imageUri":"%s"}]' \\
+          $CONTAINER_NAME \\
           $REPOSITORY_URI:$COMMIT_HASH > imagedefinitions.json
         
         echo "✅ Created imagedefinitions.json"
         cat imagedefinitions.json
       
       # Create build metadata
-    - 'echo "Creating build metadata..."; SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d"=" -f2); cat > build-metadata.json << EOF'
-    - |
-      {
-        "commitHash": "$COMMIT_HASH",
-        "fullCommitHash": "$FULL_COMMIT_HASH",
-        "branchName": "$BRANCH_NAME",
-        "buildId": "$BUILD_ID",
-        "buildNumber": "$BUILD_NUMBER",
-        "repositoryUri": "$REPOSITORY_URI",
-        "primaryImageTag": "$COMMIT_HASH",
-        "semanticImageTag": "$SEMANTIC_TAG",
-        "buildTime": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-        "awsRegion": "$AWS_DEFAULT_REGION",
-        "status": "success"
-      }
-    EOF
-    - 'echo "✅ Created build-metadata.json"; cat build-metadata.json'
-    
-    # FIXED: Create summary as single command
-    - |
-      cat > build-summary.txt << 'EOF'
+      - 'echo "Creating build metadata..."; SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d"=" -f2); cat > build-metadata.json << EOF'
+      - |
+        {
+          "commitHash": "$COMMIT_HASH",
+          "fullCommitHash": "$FULL_COMMIT_HASH",
+          "branchName": "$BRANCH_NAME",
+          "buildId": "$BUILD_ID",
+          "buildNumber": "$BUILD_NUMBER",
+          "repositoryUri": "$REPOSITORY_URI",
+          "primaryImageTag": "$COMMIT_HASH",
+          "semanticImageTag": "$SEMANTIC_TAG",
+          "buildTime": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+          "awsRegion": "$AWS_DEFAULT_REGION",
+          "status": "success"
+        }
+EOF
+      - 'echo "✅ Created build-metadata.json"; cat build-metadata.json'
       
-      ================================================
-      BUILD COMPLETED SUCCESSFULLY
-      ================================================
-      ... (rest of content)
-      EOF
-    - 'cat build-summary.txt'
-        ================================================
-        BUILD COMPLETED SUCCESSFULLY
-        ================================================
-        
-        Images pushed to ECR:
-          - $REPOSITORY_URI:$COMMIT_HASH (commit hash)
-          - $REPOSITORY_URI:build-$BUILD_NUMBER (build number)
-          - $REPOSITORY_URI:$SEMANTIC_TAG (semantic version)
-          - $REPOSITORY_URI:latest-build (latest build)
-        
-        Branch-specific tags:
-        EOF
-        
+      # Create summary as single command
+      - |
+        cat > build-summary.txt << 'EOF'
+===============================================
+BUILD COMPLETED SUCCESSFULLY
+===============================================
+
+Images pushed to ECR:
+  - $REPOSITORY_URI:$COMMIT_HASH (commit hash)
+  - $REPOSITORY_URI:build-$BUILD_NUMBER (build number)
+  - $REPOSITORY_URI:$SEMANTIC_TAG (semantic version)
+  - $REPOSITORY_URI:latest-build (latest build)
+
+Branch-specific tags:
+EOF
+
         case "$BRANCH_NAME" in
           main)
             echo "  - $REPOSITORY_URI:latest" >> build-summary.txt
@@ -253,7 +235,7 @@ phases:
         esac
         
         cat >> build-summary.txt << EOF
-        
+
         Build Information:
           Branch: $BRANCH_NAME
           Commit: $COMMIT_HASH
@@ -266,11 +248,9 @@ phases:
           3. Check GitHub Actions for deployment status
         
         ================================================
-        EOF
+EOF
         
         cat build-summary.txt
-      
-      # Display final summary
       - echo "================================================"
       - echo "BUILD COMPLETED SUCCESSFULLY!"
       - echo "================================================"
@@ -279,7 +259,6 @@ phases:
       - echo "✅ Ready for deployment"
       - echo "================================================"
 
-# Export artifacts
 artifacts:
   files:
     - imagedefinitions.json
@@ -287,15 +266,7 @@ artifacts:
     - build-summary.txt
   name: BuildArtifacts-$CODEBUILD_BUILD_NUMBER
 
-# Cache Docker layers for faster builds
 cache:
   paths:
     - '/root/.docker/**/*'
     - '/var/lib/docker/**/*'
-
-# Reports (optional - for test results)
-# reports:
-#   test-results:
-#     files:
-#       - 'test-results/**/*'
-#     file-format: 'JUNITXML'
