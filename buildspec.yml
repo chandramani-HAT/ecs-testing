@@ -23,10 +23,10 @@ phases:
       
       # Extract build information
       - echo "Extracting build information..."
-      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - FULL_COMMIT_HASH=$CODEBUILD_RESOLVED_SOURCE_VERSION
-      - BUILD_ID=$CODEBUILD_BUILD_ID
-      - BUILD_NUMBER=$(echo $BUILD_ID | cut -d: -f1 | cut -d/ -f2)
+      - "COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)"
+      - "FULL_COMMIT_HASH=$CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - "BUILD_ID=$CODEBUILD_BUILD_ID"
+      - "BUILD_NUMBER=$(echo $BUILD_ID | cut -d: -f1 | cut -d/ -f2)"
       
       # Extract branch from webhook
       - |
