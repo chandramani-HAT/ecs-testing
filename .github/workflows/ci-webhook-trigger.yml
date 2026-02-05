@@ -13,9 +13,9 @@ on:
       - main
       - develop
 
-env:
-  ECR_REPOSITORY: 533267275979.dkr.ecr.us-east-1.amazonaws.com/hat/ecs
-  AWS_REGION: us-east-1
+# env:
+#   ECR_REPOSITORY: 533267275979.dkr.ecr.us-east-1.amazonaws.com/hat/ecs
+#   AWS_REGION: us-east-1
 
 jobs:
   trigger-build:
