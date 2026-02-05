@@ -39,7 +39,8 @@ phases:
         fi
       
       # Set repository URI
-      - "REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME"
+      - |
+        REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
       
       # Display build information
       - echo "------------------------------------------------"
@@ -98,7 +99,8 @@ phases:
       
       # Show built images
       - echo "Built images:"
-      - docker images | grep $IMAGE_REPO_NAME
+      - |
+        docker images | grep $IMAGE_REPO_NAME
 
   post_build:
     commands:
@@ -196,32 +198,34 @@ phases:
         cat imagedefinitions.json
       
       # Create build metadata
-      - |
-        echo "Creating build metadata..."
-        SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d'=' -f2)
-        
-        cat > build-metadata.json << EOF
-        {
-          "commitHash": "$COMMIT_HASH",
-          "fullCommitHash": "$FULL_COMMIT_HASH",
-          "branchName": "$BRANCH_NAME",
-          "buildId": "$BUILD_ID",
-          "buildNumber": "$BUILD_NUMBER",
-          "repositoryUri": "$REPOSITORY_URI",
-          "primaryImageTag": "$COMMIT_HASH",
-          "semanticImageTag": "$SEMANTIC_TAG",
-          "buildTime": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-          "awsRegion": "$AWS_DEFAULT_REGION",
-          "status": "success"
-        }
-        EOF
-        
-        echo "✅ Created build-metadata.json"
-        cat build-metadata.json
+    - 'echo "Creating build metadata..."; SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d"=" -f2); cat > build-metadata.json << EOF'
+    - |
+      {
+        "commitHash": "$COMMIT_HASH",
+        "fullCommitHash": "$FULL_COMMIT_HASH",
+        "branchName": "$BRANCH_NAME",
+        "buildId": "$BUILD_ID",
+        "buildNumber": "$BUILD_NUMBER",
+        "repositoryUri": "$REPOSITORY_URI",
+        "primaryImageTag": "$COMMIT_HASH",
+        "semanticImageTag": "$SEMANTIC_TAG",
+        "buildTime": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+        "awsRegion": "$AWS_DEFAULT_REGION",
+        "status": "success"
+      }
+    EOF
+    - 'echo "✅ Created build-metadata.json"; cat build-metadata.json'
+    
+    # FIXED: Create summary as single command
+    - |
+      cat > build-summary.txt << 'EOF'
       
-      # Create a summary file for easy viewing
-      - |
-        cat > build-summary.txt << EOF
+      ================================================
+      BUILD COMPLETED SUCCESSFULLY
+      ================================================
+      ... (rest of content)
+      EOF
+    - 'cat build-summary.txt'
         ================================================
         BUILD COMPLETED SUCCESSFULLY
         ================================================
