@@ -1,19 +1,4 @@
 version: 0.2
-
-# This buildspec is triggered by the CodeBuild webhook when GitHub Actions calls it
-# It builds the Docker image, pushes to ECR, and reports status back to GitHub
-
-env:
-  variables:
-    # These should be set in CodeBuild project environment variables
-    # AWS_DEFAULT_REGION: us-east-1
-    # AWS_ACCOUNT_ID: 123456789012
-    # IMAGE_REPO_NAME: ecs-devops-sandbox-repository
-    # CONTAINER_NAME: ecs-devops-sandbox
-  parameter-store:
-    # Optional: Store sensitive values in Parameter Store
-    # GITHUB_TOKEN: /codebuild/github-token
-
 phases:
   pre_build:
     commands:
