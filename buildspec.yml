@@ -4,22 +4,22 @@ phases:
   pre_build:
     commands:
       - echo "================================================"
-      - echo "PRE-BUILD PHASE - $(date)"
+      - echo "PRE-BUILD PHASE"
       - echo "================================================"
       - echo "Extracting build information..."
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - FULL_COMMIT_HASH=$CODEBUILD_RESOLVED_SOURCE_VERSION
       - BUILD_ID=$CODEBUILD_BUILD_ID
       - BUILD_NUMBER=$(echo $BUILD_ID | cut -d: -f1 | cut -d/ -f2)
+      - REPOSITORY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME"
       - |
         if [ ! -z "$CODEBUILD_WEBHOOK_HEAD_REF" ]; then
-          BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\/heads\///' | sed 's/\//-/g')
+          BRANCH_NAME=$(echo "$CODEBUILD_WEBHOOK_HEAD_REF" | sed 's/refs\/heads\///' | sed 's/\//-/g')
           echo "Branch detected from webhook: $BRANCH_NAME"
         else
           BRANCH_NAME="unknown"
-          echo "Warning: Branch name not detected, using 'unknown'"
+          echo "Warning: Branch name not detected, using unknown"
         fi
-      - REPOSITORY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME"
       - echo "------------------------------------------------"
       - echo "Build Information:"
       - echo "  Repository URI: $REPOSITORY_URI"
@@ -32,25 +32,20 @@ phases:
       - echo "  Account ID: $AWS_ACCOUNT_ID"
       - echo "------------------------------------------------"
       - echo "Logging in to Amazon ECR..."
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
       - echo "Successfully logged in to ECR"
       - |
         echo "Checking if ECR repository exists..."
-        if ! aws ecr describe-repositories --repository-names $IMAGE_REPO_NAME --region $AWS_DEFAULT_REGION 2>/dev/null; then
-          echo "ECR repository $IMAGE_REPO_NAME not found!"
-          echo "Please create the repository first:"
-          echo "  aws ecr create-repository --repository-name $IMAGE_REPO_NAME --region $AWS_DEFAULT_REGION"
-          exit 1
-        fi
+        aws ecr describe-repositories --repository-names $IMAGE_REPO_NAME --region $AWS_DEFAULT_REGION > /dev/null 2>&1 || \
+        (echo "ECR repository $IMAGE_REPO_NAME not found. Please create it first." && exit 1)
         echo "ECR repository exists"
 
   build:
     commands:
       - echo "================================================"
-      - echo "BUILD PHASE - $(date)"
+      - echo "BUILD PHASE"
       - echo "================================================"
       - echo "Building Docker image..."
-      - TIMESTAMP=$(date +%Y%m%d-%H%M%S)
       - |
         echo "Running docker build with build arguments..."
         docker build \
@@ -58,9 +53,9 @@ phases:
           --build-arg VCS_REF=$COMMIT_HASH \
           --build-arg VERSION=$BRANCH_NAME-$COMMIT_HASH \
           --build-arg BUILD_NUMBER=$BUILD_NUMBER \
-          -t $REPOSITORY_URI:$COMMIT_HASH \
-          -t $REPOSITORY_URI:build-$BUILD_NUMBER \
-          -t $REPOSITORY_URI:latest-build \
+          -t "$REPOSITORY_URI:$COMMIT_HASH" \
+          -t "$REPOSITORY_URI:build-$BUILD_NUMBER" \
+          -t "$REPOSITORY_URI:latest-build" \
           .
       - echo "Docker image built successfully"
       - echo "Built images:"
@@ -69,129 +64,96 @@ phases:
   post_build:
     commands:
       - echo "================================================"
-      - echo "POST-BUILD PHASE - $(date)"
+      - echo "POST-BUILD PHASE"
       - echo "================================================"
       - echo "Pushing image with commit hash tag $COMMIT_HASH"
-      - docker push $REPOSITORY_URI:$COMMIT_HASH
+      - docker push "$REPOSITORY_URI:$COMMIT_HASH"
       - echo "Pushed commit hash tag"
       - echo "Pushing image with build number tag build-$BUILD_NUMBER"
-      - docker push $REPOSITORY_URI:build-$BUILD_NUMBER
+      - docker push "$REPOSITORY_URI:build-$BUILD_NUMBER"
       - echo "Pushed build number tag"
       - echo "Pushing latest-build tag"
-      - docker push $REPOSITORY_URI:latest-build
+      - docker push "$REPOSITORY_URI:latest-build"
       - echo "Pushed latest-build tag"
       - |
         echo "Generating semantic version tags based on branch..."
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        case "$BRANCH_NAME" in
-          main)
-            SEMANTIC_TAG="prod-${COMMIT_HASH}-${TIMESTAMP}"
-            echo "Production build detected"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$SEMANTIC_TAG
-            docker push $REPOSITORY_URI:$SEMANTIC_TAG
-            echo "Pushed prod tag"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:latest
-            docker push $REPOSITORY_URI:latest
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:stable
-            docker push $REPOSITORY_URI:stable
-            echo "Pushed stable tag"
-            ;;
-          staging)
-            SEMANTIC_TAG="staging-${COMMIT_HASH}-${TIMESTAMP}"
-            echo "Staging build detected"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$SEMANTIC_TAG
-            docker push $REPOSITORY_URI:$SEMANTIC_TAG
-            echo "Pushed staging tag"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:staging-latest
-            docker push $REPOSITORY_URI:staging-latest
-            echo "Pushed staging-latest tag"
-            ;;
-          develop)
-            SEMANTIC_TAG="dev-${COMMIT_HASH}-${TIMESTAMP}"
-            echo "Development build detected"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$SEMANTIC_TAG
-            docker push $REPOSITORY_URI:$SEMANTIC_TAG
-            echo "Pushed dev tag"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:dev-latest
-            docker push $REPOSITORY_URI:dev-latest
-            echo "Pushed dev-latest tag"
-            ;;
-          *)
-            SEMANTIC_TAG="${BRANCH_NAME}-${COMMIT_HASH}-${TIMESTAMP}"
-            echo "Feature/hotfix branch detected"
-            docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:$SEMANTIC_TAG
-            docker push $REPOSITORY_URI:$SEMANTIC_TAG
-            echo "Pushed feature tag"
-            ;;
-        esac
-        echo "semantic_tag=$SEMANTIC_TAG" > semantic_tag.txt
+        SEMANTIC_TAG="${BRANCH_NAME}-${COMMIT_HASH}-${TIMESTAMP}"
+        
+        if [ "$BRANCH_NAME" = "main" ]; then
+          SEMANTIC_TAG="prod-${COMMIT_HASH}-${TIMESTAMP}"
+          echo "Production build detected"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker push "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:latest"
+          docker push "$REPOSITORY_URI:latest"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:stable"
+          docker push "$REPOSITORY_URI:stable"
+        elif [ "$BRANCH_NAME" = "staging" ]; then
+          SEMANTIC_TAG="staging-${COMMIT_HASH}-${TIMESTAMP}"
+          echo "Staging build detected"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker push "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:staging-latest"
+          docker push "$REPOSITORY_URI:staging-latest"
+        elif [ "$BRANCH_NAME" = "develop" ]; then
+          SEMANTIC_TAG="dev-${COMMIT_HASH}-${TIMESTAMP}"
+          echo "Development build detected"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker push "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:dev-latest"
+          docker push "$REPOSITORY_URI:dev-latest"
+        else
+          echo "Feature/hotfix branch detected"
+          docker tag "$REPOSITORY_URI:$COMMIT_HASH" "$REPOSITORY_URI:$SEMANTIC_TAG"
+          docker push "$REPOSITORY_URI:$SEMANTIC_TAG"
+        fi
+        echo "$SEMANTIC_TAG" > semantic_tag.txt
       - |
         echo "Creating imagedefinitions.json..."
         printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$COMMIT_HASH" > imagedefinitions.json
-        echo "Created imagedefinitions.json"
         cat imagedefinitions.json
       - |
         echo "Creating build metadata..."
-        SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d"=" -f2)
-        cat > build-metadata.json << EOF
-        {
-          "commitHash": "$COMMIT_HASH",
-          "fullCommitHash": "$FULL_COMMIT_HASH",
-          "branchName": "$BRANCH_NAME",
-          "buildId": "$BUILD_ID",
-          "buildNumber": "$BUILD_NUMBER",
-          "repositoryUri": "$REPOSITORY_URI",
-          "primaryImageTag": "$COMMIT_HASH",
-          "semanticImageTag": "$SEMANTIC_TAG",
-          "buildTime": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-          "awsRegion": "$AWS_DEFAULT_REGION",
-          "status": "success"
-        }
-        EOF
-        echo "Created build-metadata.json"
+        SEMANTIC_TAG=$(cat semantic_tag.txt)
+        echo "{" > build-metadata.json
+        echo "  \"commitHash\": \"$COMMIT_HASH\"," >> build-metadata.json
+        echo "  \"fullCommitHash\": \"$FULL_COMMIT_HASH\"," >> build-metadata.json
+        echo "  \"branchName\": \"$BRANCH_NAME\"," >> build-metadata.json
+        echo "  \"buildId\": \"$BUILD_ID\"," >> build-metadata.json
+        echo "  \"buildNumber\": \"$BUILD_NUMBER\"," >> build-metadata.json
+        echo "  \"repositoryUri\": \"$REPOSITORY_URI\"," >> build-metadata.json
+        echo "  \"primaryImageTag\": \"$COMMIT_HASH\"," >> build-metadata.json
+        echo "  \"semanticImageTag\": \"$SEMANTIC_TAG\"," >> build-metadata.json
+        echo "  \"awsRegion\": \"$AWS_DEFAULT_REGION\"," >> build-metadata.json
+        echo "  \"status\": \"success\"" >> build-metadata.json
+        echo "}" >> build-metadata.json
         cat build-metadata.json
       - |
-        cat > build-summary.txt << EOF
-        ===============================================
-        BUILD COMPLETED SUCCESSFULLY
-        ===============================================
-
-        Images pushed to ECR:
-          - $REPOSITORY_URI:$COMMIT_HASH
-          - $REPOSITORY_URI:build-$BUILD_NUMBER
-          - $REPOSITORY_URI:$SEMANTIC_TAG
-          - $REPOSITORY_URI:latest-build
-
-        Branch-specific tags:
-        EOF
-      - |
-        case "$BRANCH_NAME" in
-          main)
-            echo "  - $REPOSITORY_URI:latest" >> build-summary.txt
-            echo "  - $REPOSITORY_URI:stable" >> build-summary.txt
-            ;;
-          staging)
-            echo "  - $REPOSITORY_URI:staging-latest" >> build-summary.txt
-            ;;
-          develop)
-            echo "  - $REPOSITORY_URI:dev-latest" >> build-summary.txt
-            ;;
-        esac
-      - |
-        cat >> build-summary.txt << EOF
-        Build Information:
-          Branch: $BRANCH_NAME
-          Commit: $COMMIT_HASH
-          Build ID: $BUILD_ID
-          Timestamp: $(date)
-
-        Next Steps:
-          1. GitHub Actions will detect this build completion
-          2. CD pipeline will deploy to appropriate environment
-          3. Check GitHub Actions for deployment status
-
-        ===============================================
-        EOF
+        echo "===============================================" > build-summary.txt
+        echo "BUILD COMPLETED SUCCESSFULLY" >> build-summary.txt
+        echo "===============================================" >> build-summary.txt
+        echo "" >> build-summary.txt
+        echo "Images pushed to ECR:" >> build-summary.txt
+        echo "  - $REPOSITORY_URI:$COMMIT_HASH" >> build-summary.txt
+        echo "  - $REPOSITORY_URI:build-$BUILD_NUMBER" >> build-summary.txt
+        echo "  - $REPOSITORY_URI:$SEMANTIC_TAG" >> build-summary.txt
+        echo "  - $REPOSITORY_URI:latest-build" >> build-summary.txt
+        echo "" >> build-summary.txt
+        echo "Branch-specific tags:" >> build-summary.txt
+        if [ "$BRANCH_NAME" = "main" ]; then
+           echo "  - $REPOSITORY_URI:latest" >> build-summary.txt
+           echo "  - $REPOSITORY_URI:stable" >> build-summary.txt
+        elif [ "$BRANCH_NAME" = "staging" ]; then
+           echo "  - $REPOSITORY_URI:staging-latest" >> build-summary.txt
+        elif [ "$BRANCH_NAME" = "develop" ]; then
+           echo "  - $REPOSITORY_URI:dev-latest" >> build-summary.txt
+        fi
+        echo "" >> build-summary.txt
+        echo "Build Information:" >> build-summary.txt
+        echo "  Branch: $BRANCH_NAME" >> build-summary.txt
+        echo "  Commit: $COMMIT_HASH" >> build-summary.txt
+        echo "  Build ID: $BUILD_ID" >> build-summary.txt
       - cat build-summary.txt
       - echo "================================================"
       - echo "BUILD COMPLETED SUCCESSFULLY!"
