@@ -19,7 +19,7 @@ phases:
           BRANCH_NAME="unknown"
           echo "Warning: Branch name not detected, using 'unknown'"
         fi
-      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - REPOSITORY_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME"
       - echo "------------------------------------------------"
       - echo "Build Information:"
       - echo "  Repository URI: $REPOSITORY_URI"
@@ -71,10 +71,10 @@ phases:
       - echo "================================================"
       - echo "POST-BUILD PHASE - $(date)"
       - echo "================================================"
-      - echo "Pushing image with commit hash tag: $COMMIT_HASH"
+      - echo "Pushing image with commit hash tag $COMMIT_HASH"
       - docker push $REPOSITORY_URI:$COMMIT_HASH
       - echo "Pushed commit hash tag"
-      - echo "Pushing image with build number tag: build-$BUILD_NUMBER"
+      - echo "Pushing image with build number tag build-$BUILD_NUMBER"
       - docker push $REPOSITORY_URI:build-$BUILD_NUMBER
       - echo "Pushed build number tag"
       - echo "Pushing latest-build tag"
@@ -127,7 +127,7 @@ phases:
         echo "semantic_tag=$SEMANTIC_TAG" > semantic_tag.txt
       - |
         echo "Creating imagedefinitions.json..."
-        printf '[{"name":"%s","imageUri":"%s"}]' $CONTAINER_NAME $REPOSITORY_URI:$COMMIT_HASH > imagedefinitions.json
+        printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$COMMIT_HASH" > imagedefinitions.json
         echo "Created imagedefinitions.json"
         cat imagedefinitions.json
       - |
@@ -155,13 +155,13 @@ phases:
         ===============================================
         BUILD COMPLETED SUCCESSFULLY
         ===============================================
-        
+
         Images pushed to ECR:
-          - $REPOSITORY_URI:$COMMIT_HASH (commit hash)
-          - $REPOSITORY_URI:build-$BUILD_NUMBER (build number)
-          - $REPOSITORY_URI:$SEMANTIC_TAG (semantic version)
-          - $REPOSITORY_URI:latest-build (latest build)
-        
+          - $REPOSITORY_URI:$COMMIT_HASH
+          - $REPOSITORY_URI:build-$BUILD_NUMBER
+          - $REPOSITORY_URI:$SEMANTIC_TAG
+          - $REPOSITORY_URI:latest-build
+
         Branch-specific tags:
         EOF
       - |
@@ -184,12 +184,12 @@ phases:
           Commit: $COMMIT_HASH
           Build ID: $BUILD_ID
           Timestamp: $(date)
-        
+
         Next Steps:
           1. GitHub Actions will detect this build completion
           2. CD pipeline will deploy to appropriate environment
           3. Check GitHub Actions for deployment status
-        
+
         ===============================================
         EOF
       - cat build-summary.txt
