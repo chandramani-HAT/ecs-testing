@@ -13,7 +13,7 @@ phases:
       - BUILD_NUMBER=$(echo $BUILD_ID | cut -d: -f1 | cut -d/ -f2)
       - |
         if [ ! -z "$CODEBUILD_WEBHOOK_HEAD_REF" ]; then
-          BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\\/heads\\///' | sed 's/\\/\\/-/g')
+          BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\/heads\///' | sed 's/\//-/g')
           echo "Branch detected from webhook: $BRANCH_NAME"
         else
           BRANCH_NAME="unknown"
@@ -32,8 +32,7 @@ phases:
       - echo "  Account ID: $AWS_ACCOUNT_ID"
       - echo "------------------------------------------------"
       - echo "Logging in to Amazon ECR..."
-      - |
-        aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
       - echo "Successfully logged in to ECR"
       - |
         echo "Checking if ECR repository exists..."
@@ -93,7 +92,6 @@ phases:
             echo "Pushed prod tag"
             docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:latest
             docker push $REPOSITORY_URI:latest
-            echo "Pushed latest tag"
             docker tag $REPOSITORY_URI:$COMMIT_HASH $REPOSITORY_URI:stable
             docker push $REPOSITORY_URI:stable
             echo "Pushed stable tag"
@@ -136,36 +134,36 @@ phases:
         echo "Creating build metadata..."
         SEMANTIC_TAG=$(cat semantic_tag.txt | cut -d"=" -f2)
         cat > build-metadata.json << EOF
-{
-  "commitHash": "$COMMIT_HASH",
-  "fullCommitHash": "$FULL_COMMIT_HASH",
-  "branchName": "$BRANCH_NAME",
-  "buildId": "$BUILD_ID",
-  "buildNumber": "$BUILD_NUMBER",
-  "repositoryUri": "$REPOSITORY_URI",
-  "primaryImageTag": "$COMMIT_HASH",
-  "semanticImageTag": "$SEMANTIC_TAG",
-  "buildTime": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-  "awsRegion": "$AWS_DEFAULT_REGION",
-  "status": "success"
-}
-EOF
+        {
+          "commitHash": "$COMMIT_HASH",
+          "fullCommitHash": "$FULL_COMMIT_HASH",
+          "branchName": "$BRANCH_NAME",
+          "buildId": "$BUILD_ID",
+          "buildNumber": "$BUILD_NUMBER",
+          "repositoryUri": "$REPOSITORY_URI",
+          "primaryImageTag": "$COMMIT_HASH",
+          "semanticImageTag": "$SEMANTIC_TAG",
+          "buildTime": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+          "awsRegion": "$AWS_DEFAULT_REGION",
+          "status": "success"
+        }
+        EOF
         echo "Created build-metadata.json"
         cat build-metadata.json
       - |
         cat > build-summary.txt << EOF
-===============================================
-BUILD COMPLETED SUCCESSFULLY
-===============================================
-
-Images pushed to ECR:
-  - $REPOSITORY_URI:$COMMIT_HASH (commit hash)
-  - $REPOSITORY_URI:build-$BUILD_NUMBER (build number)
-  - $REPOSITORY_URI:$SEMANTIC_TAG (semantic version)
-  - $REPOSITORY_URI:latest-build (latest build)
-
-Branch-specific tags:
-EOF
+        ===============================================
+        BUILD COMPLETED SUCCESSFULLY
+        ===============================================
+        
+        Images pushed to ECR:
+          - $REPOSITORY_URI:$COMMIT_HASH (commit hash)
+          - $REPOSITORY_URI:build-$BUILD_NUMBER (build number)
+          - $REPOSITORY_URI:$SEMANTIC_TAG (semantic version)
+          - $REPOSITORY_URI:latest-build (latest build)
+        
+        Branch-specific tags:
+        EOF
       - |
         case "$BRANCH_NAME" in
           main)
@@ -181,26 +179,22 @@ EOF
         esac
       - |
         cat >> build-summary.txt << EOF
-Build Information:
-  Branch: $BRANCH_NAME
-  Commit: $COMMIT_HASH
-  Build ID: $BUILD_ID
-  Timestamp: $(date)
-
-Next Steps:
-  1. GitHub Actions will detect this build completion
-  2. CD pipeline will deploy to appropriate environment
-  3. Check GitHub Actions for deployment status
-
-===============================================
-EOF
+        Build Information:
+          Branch: $BRANCH_NAME
+          Commit: $COMMIT_HASH
+          Build ID: $BUILD_ID
+          Timestamp: $(date)
+        
+        Next Steps:
+          1. GitHub Actions will detect this build completion
+          2. CD pipeline will deploy to appropriate environment
+          3. Check GitHub Actions for deployment status
+        
+        ===============================================
+        EOF
       - cat build-summary.txt
       - echo "================================================"
       - echo "BUILD COMPLETED SUCCESSFULLY!"
-      - echo "================================================"
-      - echo "All images pushed to ECR"
-      - echo "Build metadata created"
-      - echo "Ready for deployment"
       - echo "================================================"
 
 artifacts:
