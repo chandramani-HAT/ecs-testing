@@ -182,6 +182,4 @@ jobs:
           - [ ] Check security scans (Trivy results)
           
           ---
-          🤖 *This PR was automatically created by GitHub Actions*" \
-            --label "automated" \
-            --label "deployment"
+          🤖 *This PR was automatically created by GitHub Actions*"
