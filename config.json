@@ -1,0 +1,5 @@
+{
+  "docker_image_uri": "public.ecr.aws/x9y5g9l2/nodeapp:c509e87b67a267319d53140fa95a8b031762b3d9"
+  "commit_hash": "c509e87b67a267319d53140fa95a8b031762b3d9"
+  "env": "dev"
+}
