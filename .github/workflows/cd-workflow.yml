@@ -20,6 +20,7 @@ env:
   ECS_CLUSTER: aquiflow
   ECS_SERVICE: aquiflow
   CONTAINER_NAME: frontend
+  TARGET_ENV: dev
 
 jobs:
   deploy:
