@@ -1,18 +1,9 @@
 name: CD - Deploy to Amazon ECS
 
 on:
-  workflow_run:
-    workflows: ["CD - Deployment on ECS"]
-    types:
-      - completed
+  push:
     branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      image-tag:
-        description: 'Image tag to deploy (e.g., commit SHA)'
-        required: true
-        type: string
+      - feature-qa-i
 
 env:
   AWS_REGION: us-east-1
