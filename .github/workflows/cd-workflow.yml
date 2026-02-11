@@ -10,6 +10,7 @@ env:
   ECS_CLUSTER: aquiflow
   ECS_SERVICE: aquiflow
   CF_STACK_NAME: aquiflow-ecs-stack
+  TARGET_ENV: dev
 
 jobs:
   prepare:
@@ -21,8 +22,8 @@ jobs:
       contents: read
     
     outputs:
-      config-params: ${{ steps.read-config.outputs.params }}
-      image-tag: ${{ steps.read-config.outputs.imageTag }}
+      docker-image-uri: ${{ steps.read-config.outputs.dockerImageUri }}
+      commit-hash: ${{ steps.read-config.outputs.commitHash }}
     
     steps:
       - name: Checkout code
@@ -33,34 +34,34 @@ jobs:
         run: |
           echo "📖 Reading configuration from config.json"
           
+          # Check if config.json exists
+          if [ ! -f config.json ]; then
+            echo "❌ Error: config.json not found!"
+            exit 1
+          fi
+          
           # Read config.json and extract parameters
-          IMAGE_TAG=$(jq -r '.imageTag // "latest"' config.json)
-          CPU=$(jq -r '.cpu // "256"' config.json)
-          MEMORY=$(jq -r '.memory // "512"' config.json)
-          DESIRED_COUNT=$(jq -r '.desiredCount // "1"' config.json)
-          CONTAINER_PORT=$(jq -r '.containerPort // "80"' config.json)
+          DOCKER_IMAGE_URI=$(jq -r '.docker_image_uri' config.json)
+          COMMIT_HASH=$(jq -r '.commit_hash' config.json)
+          
+          # Validate required fields
+          if [ "$DOCKER_IMAGE_URI" == "null" ] || [ -z "$DOCKER_IMAGE_URI" ]; then
+            echo "❌ Error: docker_image_uri is missing in config.json"
+            exit 1
+          fi
+          
+          if [ "$COMMIT_HASH" == "null" ] || [ -z "$COMMIT_HASH" ]; then
+            echo "❌ Error: commit_hash is missing in config.json"
+            exit 1
+          fi
           
           # Set outputs
-          echo "imageTag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "dockerImageUri=$DOCKER_IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "commitHash=$COMMIT_HASH" >> $GITHUB_OUTPUT
           
-          # Create parameter overrides JSON for CloudFormation
-          PARAMS=$(jq -n \
-            --arg tag "$IMAGE_TAG" \
-            --arg cpu "$CPU" \
-            --arg memory "$MEMORY" \
-            --arg count "$DESIRED_COUNT" \
-            --arg port "$CONTAINER_PORT" \
-            '{
-              ImageTag: $tag,
-              TaskCpu: $cpu,
-              TaskMemory: $memory,
-              DesiredCount: $count,
-              ContainerPort: $port
-            }')
-          
-          echo "params=$PARAMS" >> $GITHUB_OUTPUT
           echo "✅ Configuration loaded successfully"
-          echo "$PARAMS" | jq .
+          echo "Docker Image URI: $DOCKER_IMAGE_URI"
+          echo "Commit Hash: $COMMIT_HASH"
 
   approval:
     name: Manual Approval Required
@@ -79,9 +80,12 @@ jobs:
       - name: Wait for approval
         run: |
           echo "⏳ Waiting for manual approval..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
-          echo "Image Tag: ${{ needs.prepare.outputs.image-tag }}"
+          echo "Docker Image: ${{ needs.prepare.outputs.docker-image-uri }}"
+          echo "Commit Hash: ${{ needs.prepare.outputs.commit-hash }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "Please review and approve in GitHub UI"
 
   deploy:
@@ -101,26 +105,28 @@ jobs:
         id: update-stack
         run: |
           echo "🚀 Updating CloudFormation stack: ${{ env.CF_STACK_NAME }}"
+          echo "Docker Image URI: ${{ needs.prepare.outputs.docker-image-uri }}"
           
-          # Parse parameters from previous job
-          PARAMS='${{ needs.prepare.outputs.config-params }}'
-          
-          # Convert JSON to CloudFormation parameter format
-          CF_PARAMS=$(echo "$PARAMS" | jq -r 'to_entries | map("ParameterKey=\(.key),ParameterValue=\(.value)") | join(" ")')
-          
-          # Update CloudFormation stack
+          # Update CloudFormation stack with docker image URI
           aws cloudformation update-stack \
             --stack-name ${{ env.CF_STACK_NAME }} \
             --use-previous-template \
-            --parameters $CF_PARAMS \
+            --parameters \
+              ParameterKey=DockerImageUri,ParameterValue="${{ needs.prepare.outputs.docker-image-uri }}" \
+              ParameterKey=CommitHash,ParameterValue="${{ needs.prepare.outputs.commit-hash }}" \
             --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-            --region ${{ env.AWS_REGION }} || true
+            --region ${{ env.AWS_REGION }} || {
+              echo "⚠️ No changes detected or stack update failed"
+              exit 0
+            }
           
           # Wait for stack update to complete
           echo "⏳ Waiting for stack update to complete..."
           aws cloudformation wait stack-update-complete \
             --stack-name ${{ env.CF_STACK_NAME }} \
-            --region ${{ env.AWS_REGION }}
+            --region ${{ env.AWS_REGION }} || {
+              echo "ℹ️ Stack update completed with no changes"
+            }
           
           echo "✅ CloudFormation stack updated successfully"
       
@@ -161,7 +167,8 @@ jobs:
           echo "Cluster: ${{ env.ECS_CLUSTER }}"
           echo "Service: ${{ env.ECS_SERVICE }}"
           echo "Task Definition: ${{ steps.get-resources.outputs.task-def-arn }}"
-          echo "Image Tag: ${{ needs.prepare.outputs.image-tag }}"
+          echo "Docker Image: ${{ needs.prepare.outputs.docker-image-uri }}"
+          echo "Commit Hash: ${{ needs.prepare.outputs.commit-hash }}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
           # Display service status
