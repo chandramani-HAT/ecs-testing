@@ -180,7 +180,6 @@ jobs:
           - [ ] Check security scans (Trivy results)
           
           ---
+          
           🤖 *This PR was automatically created by GitHub Actions*"
 
-          ---
-          🤖 *This PR was automatically created by GitHub Actions*"
