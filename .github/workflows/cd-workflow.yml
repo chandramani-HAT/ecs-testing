@@ -74,7 +74,7 @@ jobs:
     
     environment:
       name: dev
-      url: https://aquiflow.com
+      url: https://dev-aquiflow.com
     
     steps:
       - name: Wait for approval
