@@ -1,4 +1,4 @@
-name: CI/CD - Build and Deploy to Multiple Environments
+name: CI - Build, Scan, and Push Docker Image
 
 on:
   push:
@@ -8,22 +8,6 @@ on:
   pull_request:
     branches:
       - main
-  # Manual deployment trigger
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Target environment'
-        required: true
-        type: choice
-        options:
-          - dev
-          - qa
-          - stage
-          - prod
-      image_tag:
-        description: 'Docker image tag (commit hash)'
-        required: true
-        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -34,26 +18,24 @@ jobs:
     name: Build, Scan, and Push
     runs-on:
       - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
-    # Only run build on push/PR, not on manual workflow dispatch
-    if: github.event_name != 'workflow_dispatch'
-    
+
     permissions:
       id-token: write
       contents: read
       security-events: write
-    
+
     outputs:
       image-tag: ${{ steps.build-image.outputs.image-tag }}
       image-uri: ${{ steps.build-image.outputs.image-uri }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-      
+
       - name: Build Docker image
         id: build-image
         env:
@@ -62,15 +44,15 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          
+
           echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
           echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-      
+
       - name: Run Unit Tests
         run: |
           echo "Running unit tests..."
           echo "✅ Unit tests completed successfully"
-      
+
       - name: SonarQube Scan
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -78,7 +60,7 @@ jobs:
         run: |
           echo "Running SonarQube analysis..."
           echo "✅ SonarQube scan completed successfully"
-      
+
       - name: Run Trivy vulnerability scanner (SARIF)
         uses: aquasecurity/trivy-action@master
         with:
@@ -87,12 +69,12 @@ jobs:
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
           exit-code: '0'
-      
+
       - name: Upload Trivy scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-results.sarif'
-      
+
       - name: Run Trivy vulnerability scanner (Table)
         uses: aquasecurity/trivy-action@master
         with:
@@ -100,7 +82,7 @@ jobs:
           format: 'table'
           severity: 'CRITICAL,HIGH,MEDIUM'
           exit-code: '0'
-      
+
       - name: Push Docker image to Amazon ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -110,149 +92,99 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "✅ Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-
-  # Deploy to DEV (automatic after build)
-  deploy-to-dev:
-    name: Deploy to DEV
+### ===============================================
+  update-config-and-create-pr:
+    name: Update Config and Create PR
     needs: build-scan-push
     runs-on: 
       - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    permissions:
-      contents: write
-      pull-requests: write
-    
-    steps:
-      - name: Update DEV config
-        uses: ./.github/workflows/update-config.yml
-        with:
-          environment: dev
-          branch: feature-dev-i
-          image-tag: ${{ needs.build-scan-push.outputs.image-tag }}
-          image-uri: ${{ needs.build-scan-push.outputs.image-uri }}
-          pat-token: ${{ secrets.PAT_TOKEN }}
 
-  # Manual deployment to specific environment
-  manual-deploy:
-    name: Manual Deploy to ${{ github.event.inputs.environment }}
-    runs-on:
-      - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
-    if: github.event_name == 'workflow_dispatch'
-    
     permissions:
       contents: write
       pull-requests: write
-    
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      
-      - name: Get image URI
-        id: get-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
-        run: |
-          echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-      
-      - name: Determine target branch
-        id: determine-branch
-        run: |
-          case "${{ github.event.inputs.environment }}" in
-            dev)
-              echo "target-branch=feature-dev-i" >> $GITHUB_OUTPUT
-              ;;
-            qa)
-              echo "target-branch=feature-qa-i" >> $GITHUB_OUTPUT
-              ;;
-            stage)
-              echo "target-branch=feature-stage-i" >> $GITHUB_OUTPUT
-              ;;
-            prod)
-              echo "target-branch=feature-prod-i" >> $GITHUB_OUTPUT
-              ;;
-          esac
-      
-      - name: Checkout target branch
+      - name: Checkout feature-dev-i branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.determine-branch.outputs.target-branch }}
+          ref: feature-dev-i
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
-      
+
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      
-      - name: Create temporary branch
+
+      - name: Create temporary branch from feature-dev-i
         run: |
-          TEMP_BRANCH="deploy-${{ github.event.inputs.environment }}-$(date +%Y%m%d-%H%M%S)"
+          TEMP_BRANCH="config-update-$(date +%Y%m%d-%H%M%S)"
           git checkout -b $TEMP_BRANCH
           echo "TEMP_BRANCH=$TEMP_BRANCH" >> $GITHUB_ENV
-      
+          echo "✅ Created temporary branch: $TEMP_BRANCH from feature-dev-i"
+
       - name: Update config.json
         env:
-          COMMIT_HASH: ${{ github.event.inputs.image_tag }}
-          IMAGE_URI: ${{ steps.get-image.outputs.image-uri }}
+          COMMIT_HASH: ${{ needs.build-scan-push.outputs.image-tag }}
+          IMAGE_URI: ${{ needs.build-scan-push.outputs.image-uri }}
         run: |
           if [ ! -f config.json ]; then
-            cat > config.json << 'EOF'
-          {
-            "docker_image_uri": "",
-            "commit_hash": ""
-          }
-          EOF
+            echo '{"docker_image_uri":"","commit_hash":""}' > config.json
+            echo "✅ Created new config.json"
           fi
-          
-          echo "📄 Before update:"
+
+          jq --arg commit "$COMMIT_HASH" --arg uri "$IMAGE_URI" \
+            '.docker_image_uri = $uri | .commit_hash = $commit' \
+            config.json > config.json.tmp && mv config.json.tmp config.json
+
+          echo "✅ Updated config.json:"
           cat config.json
-          
-          sed -i 's|"docker_image_uri"[[:space:]]*:[[:space:]]*"[^"]*"|"docker_image_uri": "'"$IMAGE_URI"'"|g' config.json
-          sed -i 's|"commit_hash"[[:space:]]*:[[:space:]]*"[^"]*"|"commit_hash": "'"$COMMIT_HASH"'"|g' config.json
-          
-          echo ""
-          echo "✅ After update:"
-          cat config.json
-      
-      - name: Commit and push
+
+      - name: Commit changes
         run: |
           git add config.json
-          git commit -m "deploy: ${{ github.event.inputs.environment }} - ${{ github.event.inputs.image_tag }}
-          
-          - Environment: ${{ github.event.inputs.environment }}
-          - Image: ${{ steps.get-image.outputs.image-uri }}
-          - Triggered by: @${{ github.actor }}"
+          git commit -m "chore: update deployment config
+
+          - Image: ${{ needs.build-scan-push.outputs.image-uri }}
+          - Commit: ${{ needs.build-scan-push.outputs.image-tag }}
+          - Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Push temporary branch
+        run: |
           git push origin $TEMP_BRANCH
-      
-      - name: Create Pull Request
+          echo "✅ Pushed branch: $TEMP_BRANCH"
+
+      - name: Create Pull Request to feature-dev-i
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           gh pr create \
-            --base ${{ steps.determine-branch.outputs.target-branch }} \
+            --base feature-dev-i \
             --head $TEMP_BRANCH \
-            --title "🚀 Deploy to ${{ github.event.inputs.environment }}: ${{ github.event.inputs.image_tag }}" \
-            --body "## Manual Deployment to ${{ github.event.inputs.environment }}
-          
+            --title "🚀 Deploy: ${{ needs.build-scan-push.outputs.image-tag }}" \
+            --body "## Automated Deployment Config Update
+
+          This PR updates \`config.json\` in \`feature-dev-i\` with the latest Docker image from the main branch build.
+
           ### Details
-          - **Environment**: \`${{ github.event.inputs.environment }}\`
-          - **Commit Hash**: \`${{ github.event.inputs.image_tag }}\`
-          - **Docker Image**: \`${{ steps.get-image.outputs.image-uri }}\`
-          - **Requested By**: @${{ github.actor }}
-          - **Workflow**: [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          
-          ### Pre-Merge Checklist
+          - **Commit Hash**: \`${{ needs.build-scan-push.outputs.image-tag }}\`
+          - **Docker Image**: \`${{ needs.build-scan-push.outputs.image-uri }}\`
+          - **Build Workflow**: [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - **Triggered By**: @${{ github.actor }}
+          - **Source Branch**: \`main\`
+          - **Target Branch**: \`feature-dev-i\`
+
+          ### What Changed
+          - Updated \`docker_image_uri\` with new ECR image URI
+          - Updated \`commit_hash\` with build commit SHA
+
+          ### Before Merging
           - [ ] Verify image exists in ECR
-          - [ ] Confirm tests passed in previous environment
-          - [ ] Review change log
-          - [ ] Notify team of deployment
-          
+          - [ ] Confirm all tests passed in main branch
+          - [ ] Check security scans (Trivy results)
+          - [ ] Ready to deploy to dev environment
+
           ---
-          
-          🤖 *Manual deployment requested by @${{ github.actor }}*"
+
+          🤖 *This PR was automatically created by GitHub Actions*"
