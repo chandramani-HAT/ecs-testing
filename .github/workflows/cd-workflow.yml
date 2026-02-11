@@ -12,7 +12,7 @@ on:
           - staging
           - production
         default: 'dev'
-
+ 
 env:
   AWS_REGION: us-east-1
   ECS_CLUSTER: aquiflow
