@@ -1,101 +1,187 @@
 name: CD - Deploy to Amazon ECS
 
 on:
-  push:
-    branches:
-      - feature-dev-i
-    
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+        default: 'dev'
+
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: hat/ecs
   ECS_CLUSTER: aquiflow
   ECS_SERVICE: aquiflow
-  CONTAINER_NAME: frontend
-  TARGET_ENV: dev
+  CF_STACK_NAME: aquiflow-ecs-stack
 
 jobs:
-  deploy:
-    name: Deploy to ECS
+  prepare:
+    name: Prepare Deployment
     runs-on:
       - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
     
-    # Only run if CI workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    
     permissions:
-      id-token: write
       contents: read
     
-    environment:
-      name: production
-      url: https://aquiflow.com #we can add it on the codebuild
+    outputs:
+      config-params: ${{ steps.read-config.outputs.params }}
+      image-tag: ${{ steps.read-config.outputs.imageTag }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      
-      - name: Determine image tag
-        id: image-tag
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      - name: Read configuration
+        id: read-config
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ inputs.image-tag }}"
-          else
-            IMAGE_TAG="${{ github.sha }}"
-          fi
+          echo "📖 Reading configuration from config.json"
           
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "Deploying image: $IMAGE_URI"
-      
-      - name: Download current task definition
+          # Read config.json and extract parameters
+          IMAGE_TAG=$(jq -r '.imageTag // "latest"' config.json)
+          CPU=$(jq -r '.cpu // "256"' config.json)
+          MEMORY=$(jq -r '.memory // "512"' config.json)
+          DESIRED_COUNT=$(jq -r '.desiredCount // "1"' config.json)
+          CONTAINER_PORT=$(jq -r '.containerPort // "80"' config.json)
+          
+          # Set outputs
+          echo "imageTag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          
+          # Create parameter overrides JSON for CloudFormation
+          PARAMS=$(jq -n \
+            --arg tag "$IMAGE_TAG" \
+            --arg cpu "$CPU" \
+            --arg memory "$MEMORY" \
+            --arg count "$DESIRED_COUNT" \
+            --arg port "$CONTAINER_PORT" \
+            '{
+              ImageTag: $tag,
+              TaskCpu: $cpu,
+              TaskMemory: $memory,
+              DesiredCount: $count,
+              ContainerPort: $port
+            }')
+          
+          echo "params=$PARAMS" >> $GITHUB_OUTPUT
+          echo "✅ Configuration loaded successfully"
+          echo "$PARAMS" | jq .
+
+  approval:
+    name: Manual Approval Required
+    needs: prepare
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: ${{ github.event.inputs.environment }}
+      url: https://aquiflow.com
+    
+    steps:
+      - name: Wait for approval
         run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_SERVICE }} \
-            --query taskDefinition > task-definition.json
+          echo "⏳ Waiting for manual approval..."
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Image Tag: ${{ needs.prepare.outputs.image-tag }}"
+          echo "Please review and approve in GitHub UI"
+
+  deploy:
+    name: Deploy to ECS via CloudFormation
+    needs: [prepare, approval]
+    runs-on:
+      - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
+    
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       
-      - name: Fill in the new image ID in the Amazon ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.image-tag.outputs.image-uri }}
-      
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          wait-for-minutes: 10
-      
-      - name: Verify deployment
+      - name: Update CloudFormation Stack
+        id: update-stack
         run: |
-          echo "🚀 Deployment completed successfully!"
-          echo "Service: ${{ env.ECS_SERVICE }}"
+          echo "🚀 Updating CloudFormation stack: ${{ env.CF_STACK_NAME }}"
+          
+          # Parse parameters from previous job
+          PARAMS='${{ needs.prepare.outputs.config-params }}'
+          
+          # Convert JSON to CloudFormation parameter format
+          CF_PARAMS=$(echo "$PARAMS" | jq -r 'to_entries | map("ParameterKey=\(.key),ParameterValue=\(.value)") | join(" ")')
+          
+          # Update CloudFormation stack
+          aws cloudformation update-stack \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --use-previous-template \
+            --parameters $CF_PARAMS \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Wait for stack update to complete
+          echo "⏳ Waiting for stack update to complete..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ CloudFormation stack updated successfully"
+      
+      - name: Get Updated Resources
+        id: get-resources
+        run: |
+          echo "📋 Fetching updated resource information..."
+          
+          # Get Task Definition ARN from CloudFormation stack
+          TASK_DEF_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`TaskDefinitionArn`].OutputValue' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          
+          echo "task-def-arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Task Definition: $TASK_DEF_ARN"
+      
+      - name: Verify ECS Service Deployment
+        run: |
+          echo "🔍 Verifying ECS service deployment..."
+          
+          # Wait for service to stabilize
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ Service is stable"
+      
+      - name: Deployment Summary
+        run: |
+          echo "🎉 Deployment completed successfully!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Stack: ${{ env.CF_STACK_NAME }}"
           echo "Cluster: ${{ env.ECS_CLUSTER }}"
-          echo "Image: ${{ steps.image-tag.outputs.image-uri }}"
+          echo "Service: ${{ env.ECS_SERVICE }}"
+          echo "Task Definition: ${{ steps.get-resources.outputs.task-def-arn }}"
+          echo "Image Tag: ${{ needs.prepare.outputs.image-tag }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          echo "Service Status:"
+          # Display service status
+          echo ""
+          echo "📊 Service Status:"
           aws ecs describe-services \
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
             --query 'services[0].[serviceName,status,runningCount,desiredCount,deployments[0].status]' \
             --output table
       
-      - name: Deployment notification
+      - name: Deployment Notification
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Deployment successful!"
+            echo "✅ Deployment successful to ${{ github.event.inputs.environment }}!"
           else
             echo "❌ Deployment failed!"
+            exit 1
           fi
