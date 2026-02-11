@@ -1,109 +1,192 @@
 name: CD - Deploy to Amazon ECS
 
 on:
-  workflow_run:
-    workflows: ["CD - Deployment on ECS"]
-    types:
-      - completed
+  push:
     branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      image-tag:
-        description: 'Image tag to deploy (e.g., commit SHA)'
-        required: true
-        type: string
+      - feature-prod-i
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: hat/ecs
   ECS_CLUSTER: aquiflow
   ECS_SERVICE: aquiflow
-  CONTAINER_NAME: frontend
+  CF_STACK_NAME: aquiflow-ecs-stack
+  TARGET_ENV: prod
 
 jobs:
-  deploy:
-    name: Deploy to ECS
+  prepare:
+    name: Prepare Deployment
     runs-on:
       - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
     
-    # Only run if CI workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    
     permissions:
-      id-token: write
       contents: read
     
-    environment:
-      name: production
-      url: https://aquiflow.com #we can add it on the codebuild
+    outputs:
+      docker-image-uri: ${{ steps.read-config.outputs.dockerImageUri }}
+      commit-hash: ${{ steps.read-config.outputs.commitHash }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      
-      - name: Determine image tag
-        id: image-tag
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      - name: Read configuration
+        id: read-config
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            IMAGE_TAG="${{ inputs.image-tag }}"
-          else
-            IMAGE_TAG="${{ github.sha }}"
+          echo "📖 Reading configuration from config.json"
+          
+          # Check if config.json exists
+          if [ ! -f config.json ]; then
+            echo "❌ Error: config.json not found!!!"
+            exit 1
           fi
           
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "image-uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "Deploying image: $IMAGE_URI"
-      
-      - name: Download current task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition ${{ env.ECS_SERVICE }} \
-            --query taskDefinition > task-definition.json
-      
-      - name: Fill in the new image ID in the Amazon ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: ${{ env.CONTAINER_NAME }}
-          image: ${{ steps.image-tag.outputs.image-uri }}
-      
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-          wait-for-minutes: 10
-      
-      - name: Verify deployment
-        run: |
-          echo "🚀 Deployment completed successfully!"
-          echo "Service: ${{ env.ECS_SERVICE }}"
-          echo "Cluster: ${{ env.ECS_CLUSTER }}"
-          echo "Image: ${{ steps.image-tag.outputs.image-uri }}"
+          # Read config.json and extract parameters
+          DOCKER_IMAGE_URI=$(jq -r '.docker_image_uri' config.json)
+          COMMIT_HASH=$(jq -r '.commit_hash' config.json)
           
-          echo "Service Status:"
+          # Validate required fields
+          if [ "$DOCKER_IMAGE_URI" == "null" ] || [ -z "$DOCKER_IMAGE_URI" ]; then
+            echo "❌ Error: docker_image_uri is missing in config.json"
+            exit 1
+          fi
+          
+          if [ "$COMMIT_HASH" == "null" ] || [ -z "$COMMIT_HASH" ]; then
+            echo "❌ Error: commit_hash is missing in config.json"
+            exit 1
+          fi
+          
+          # Set outputs
+          echo "dockerImageUri=$DOCKER_IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "commitHash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          
+          echo "✅ Configuration loaded successfully"
+          echo "Docker Image URI: $DOCKER_IMAGE_URI"
+          echo "Commit Hash: $COMMIT_HASH"
+
+  approval:
+    name: Manual Approval Required
+    needs: prepare
+    runs-on:
+      - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
+    
+    permissions:
+      contents: read
+    
+    environment:
+      name: production
+      url: https://prod-aquiflow.com
+    
+    steps:
+      - name: Wait for approval
+        run: |
+          echo "⏳ Waiting for manual approval..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Docker Image: ${{ needs.prepare.outputs.docker-image-uri }}"
+          echo "Commit Hash: ${{ needs.prepare.outputs.commit-hash }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Please review and approve in GitHub UI"
+
+  deploy:
+    name: Deploy to ECS via CloudFormation
+    needs: [prepare, approval]
+    runs-on:
+      - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
+    
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Update CloudFormation Stack
+        id: update-stack
+        run: |
+          echo "🚀 Updating CloudFormation stack: ${{ env.CF_STACK_NAME }}"
+          echo "Docker Image URI: ${{ needs.prepare.outputs.docker-image-uri }}"
+          
+          # Update CloudFormation stack with docker image URI
+          aws cloudformation update-stack \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --use-previous-template \
+            --parameters \
+              ParameterKey=DockerImageUri,ParameterValue="${{ needs.prepare.outputs.docker-image-uri }}" \
+              ParameterKey=CommitHash,ParameterValue="${{ needs.prepare.outputs.commit-hash }}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }} || {
+              echo "⚠️ No changes detected or stack update failed"
+              exit 0
+            }
+          
+          # Wait for stack update to complete
+          echo "⏳ Waiting for stack update to complete..."
+          aws cloudformation wait stack-update-complete \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} || {
+              echo "ℹ️ Stack update completed with no changes"
+            }
+          
+          echo "✅ CloudFormation stack updated successfully"
+      
+      - name: Get Updated Resources
+        id: get-resources
+        run: |
+          echo "📋 Fetching updated resource information..."
+          
+          # Get Task Definition ARN from CloudFormation stack
+          TASK_DEF_ARN=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CF_STACK_NAME }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`TaskDefinitionArn`].OutputValue' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          
+          echo "task-def-arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Task Definition: $TASK_DEF_ARN"
+      
+      - name: Verify ECS Service Deployment
+        run: |
+          echo "🔍 Verifying ECS service deployment..."
+          
+          # Wait for service to stabilize
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }}
+          
+          echo "✅ Service is stable"
+      
+      - name: Deployment Summary
+        run: |
+          echo "🎉 Deployment completed successfully!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Stack: ${{ env.CF_STACK_NAME }}"
+          echo "Cluster: ${{ env.ECS_CLUSTER }}"
+          echo "Service: ${{ env.ECS_SERVICE }}"
+          echo "Task Definition: ${{ steps.get-resources.outputs.task-def-arn }}"
+          echo "Docker Image: ${{ needs.prepare.outputs.docker-image-uri }}"
+          echo "Commit Hash: ${{ needs.prepare.outputs.commit-hash }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Display service status
+          echo ""
+          echo "📊 Service Status:"
           aws ecs describe-services \
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
             --query 'services[0].[serviceName,status,runningCount,desiredCount,deployments[0].status]' \
             --output table
       
-      - name: Deployment notification
+      - name: Deployment Notification
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
-            echo "✅ Deployment successful!"
+            echo "✅ Deployment successful to ${{ env.TARGET_ENV }}!"
           else
             echo "❌ Deployment failed!"
+            exit 1
           fi
