@@ -129,13 +129,11 @@ jobs:
           COMMIT_HASH: ${{ needs.build-scan-push.outputs.image-tag }}
           IMAGE_URI: ${{ needs.build-scan-push.outputs.image-uri }}
         run: |
-          # Create config.json if it doesn't exist
           if [ ! -f config.json ]; then
             echo '{"docker_image_uri":"","commit_hash":""}' > config.json
             echo "✅ Created new config.json"
           fi
           
-          # Update config.json with new values
           jq --arg commit "$COMMIT_HASH" --arg uri "$IMAGE_URI" \
             '.docker_image_uri = $uri | .commit_hash = $commit' \
             config.json > config.json.tmp && mv config.json.tmp config.json
