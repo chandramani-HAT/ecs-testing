@@ -73,7 +73,7 @@ jobs:
       contents: read
     
     environment:
-      name: production
+      name: dev
       url: https://aquiflow.com
     
     steps:
