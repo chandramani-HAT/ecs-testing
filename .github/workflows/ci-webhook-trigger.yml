@@ -19,11 +19,6 @@ jobs:
     runs-on:
       - codebuild-ecs-workflow-${{ github.run_id }}-${{ github.run_attempt }}
     
-    # Skip workflow if it's an automated config update
-    if: |
-      !contains(github.event.head_commit.message, '[skip ci]') &&
-      !startsWith(github.event.head_commit.message, 'chore: update deployment config')
-    
     permissions:
       id-token: write
       contents: read
@@ -110,10 +105,10 @@ jobs:
       pull-requests: write
     
     steps:
-      - name: Checkout main branch
+      - name: Checkout feature-dev-i branch
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: feature-dev-i
           token: ${{ secrets.PAT_TOKEN }}
           fetch-depth: 0
       
@@ -122,21 +117,25 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       
-      - name: Create config update branch
+      - name: Create temporary branch from feature-dev-i
         run: |
-          BRANCH_NAME="config-update-$(date +%Y%m%d-%H%M%S)"
-          git checkout -b $BRANCH_NAME
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+          TEMP_BRANCH="config-update-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b $TEMP_BRANCH
+          echo "TEMP_BRANCH=$TEMP_BRANCH" >> $GITHUB_ENV
+          echo "✅ Created temporary branch: $TEMP_BRANCH from feature-dev-i"
       
       - name: Update config.json
         env:
           COMMIT_HASH: ${{ needs.build-scan-push.outputs.image-tag }}
           IMAGE_URI: ${{ needs.build-scan-push.outputs.image-uri }}
         run: |
+          # Create config.json if it doesn't exist
           if [ ! -f config.json ]; then
             echo '{"docker_image_uri":"","commit_hash":""}' > config.json
+            echo "✅ Created new config.json"
           fi
           
+          # Update config.json with new values
           jq --arg commit "$COMMIT_HASH" --arg uri "$IMAGE_URI" \
             '.docker_image_uri = $uri | .commit_hash = $commit' \
             config.json > config.json.tmp && mv config.json.tmp config.json
@@ -147,29 +146,36 @@ jobs:
       - name: Commit changes
         run: |
           git add config.json
-          git commit -m "chore: update deployment config with image ${{ needs.build-scan-push.outputs.image-tag }}"
+          git commit -m "chore: update deployment config
+          
+          - Image: ${{ needs.build-scan-push.outputs.image-uri }}
+          - Commit: ${{ needs.build-scan-push.outputs.image-tag }}
+          - Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
       
-      - name: Push branch
+      - name: Push temporary branch
         run: |
-          git push origin $BRANCH_NAME
+          git push origin $TEMP_BRANCH
+          echo "✅ Pushed branch: $TEMP_BRANCH"
       
-      - name: Create Pull Request to main
+      - name: Create Pull Request to feature-dev-i
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           gh pr create \
-            --base main \
-            --head $BRANCH_NAME \
+            --base feature-dev-i \
+            --head $TEMP_BRANCH \
             --title "🚀 Deploy: ${{ needs.build-scan-push.outputs.image-tag }}" \
             --body "## Automated Deployment Config Update
           
-          This PR updates \`config.json\` with the latest Docker image from the successful build.
+          This PR updates \`config.json\` in \`feature-dev-i\` with the latest Docker image from the main branch build.
           
           ### Details
           - **Commit Hash**: \`${{ needs.build-scan-push.outputs.image-tag }}\`
           - **Docker Image**: \`${{ needs.build-scan-push.outputs.image-uri }}\`
           - **Build Workflow**: [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           - **Triggered By**: @${{ github.actor }}
+          - **Source Branch**: \`main\`
+          - **Target Branch**: \`feature-dev-i\`
           
           ### What Changed
           - Updated \`docker_image_uri\` with new ECR image URI
@@ -177,8 +183,9 @@ jobs:
           
           ### Before Merging
           - [ ] Verify image exists in ECR
-          - [ ] Confirm all tests passed
+          - [ ] Confirm all tests passed in main branch
           - [ ] Check security scans (Trivy results)
+          - [ ] Ready to deploy to dev environment
           
           ---
           
